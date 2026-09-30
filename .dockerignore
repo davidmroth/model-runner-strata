@@ -1,0 +1,5 @@
+.git
+.env*
+upstream
+models-cache
+*.md

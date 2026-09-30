@@ -1,0 +1,110 @@
+# Strata (Qwen3.8-Flash-Next Coder on GPU + RAM + SSD), internal :8080 on the ai-inference network.
+#
+#   docker network create ai-inference                     # once
+#   docker run --rm -v "$PWD:/w" -w /w --entrypoint sh alpine/git scripts/prepare-upstream.sh
+#   docker compose build strata                            # upstream image + tests (20-40 min, no GPU needed)
+#   docker compose --profile serve up -d strata            # first start downloads ~63 GB and prepares the model
+#
+# The first start (or STRATA_REINSTALL=1) runs upstream's setup; later starts go straight to the server.
+
+# Setup settings shared by the server and the one-off installer, so a model installed in the background is set up
+# exactly as the server would set it up.
+x-install-settings: &install-settings
+  HF_TOKEN: ${HF_TOKEN:-}
+  CONTEXT: ${STRATA_CONTEXT:-131072}
+  KV: ${STRATA_KV:-int8}
+  VISION: ${STRATA_VISION:-yes}
+  GPUS: ${STRATA_GPUS:-0,1}
+  # auto picks the one-GPU low-RAM mode on hosts below the model's RAM + 10 GB headroom (Coder: 33.4 GB)
+  LOW_RAM: ${STRATA_LOW_RAM:-off}
+  API_KEY: ${STRATA_API_KEY:-}
+
+x-gpus: &gpus
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: ${GPU_COUNT:-2}
+          capabilities: [compute, utility]
+
+services:
+  # Build-only: upstream's Dockerfile from upstream/ (scripts/prepare-upstream.sh: pinned commit + patches/),
+  # narrowed to one GPU generation. No profile, so "strata" can reference it under any profile; scale 0 keeps
+  # it from ever running.
+  strata-engine:
+    scale: 0
+    build:
+      context: ./upstream
+      args:
+        CUDA_ARCHITECTURES: ${CUDA_ARCHITECTURES:-86}
+        BUILD_VISION: ${STRATA_BUILD_VISION:-1}
+        # AVX2 CPU baseline instead of the build machine's CPU, so the image runs on any recent x86-64 host
+        STRATA_PORTABLE: ${STRATA_PORTABLE:-1}
+        # optional GCC -march name (e.g. raptorlake) to tune the CPU code for the serving host's CPU family
+        STRATA_CPU_ARCH: ${STRATA_CPU_ARCH:-}
+    image: model-runner-strata-engine:${STRATA_VERSION:-0.1.38}
+
+  strata:
+    profiles: ["serve"]
+    build:
+      context: .
+      additional_contexts:
+        engine: service:strata-engine
+      args:
+        STRATA_PORTABLE: ${STRATA_PORTABLE:-1}
+    image: model-runner-strata:${STRATA_VERSION:-0.1.38}
+    container_name: model-runner-strata
+    restart: ${RESTART:-unless-stopped}
+    expose:
+      - "8080"
+    volumes:
+      - ${STRATA_DATA_DIR:-./models-cache}:/data
+    environment:
+      <<: *install-settings
+      FAMILY: ${STRATA_FAMILY:-coder}
+      MODEL: ${STRATA_MODEL:-IQ1_M}
+      # 1 = every GPU of a split keeps its own prompt buffers (0.1.25 behaviour); 0 = they borrow expert-cache slots
+      # and stream those experts from RAM on every prompt; auto = own buffers only where they fit in 12% of VRAM
+      STRATA_SPLIT_OWN: ${STRATA_SPLIT_OWN:-0}
+      # first layer of each later GPU's share (e.g. 20, or 16,32 for three cards); empty = upstream's auto split.
+      # Upstream's entrypoint passes it on every start and setup saves it into the model config.
+      LAYER_SPLIT: ${STRATA_LAYER_SPLIT:-}
+      REINSTALL: ${STRATA_REINSTALL:-0}
+      # Without an API key the server only answers requests whose Host header it knows (DNS-rebinding guard), and the
+      # container's own hostname is its ID; other containers reach it by its container name.
+      STRATA_ALLOWED_HOSTS: ${STRATA_ALLOWED_HOSTS:-model-runner-strata}
+    # Strata pins part of system RAM for the GPU; without this the engine falls back or fails to start.
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    cap_add:
+      - IPC_LOCK
+    deploy: *gpus
+    networks:
+      - ai-inference
+
+  # One-off: downloads and prepares another model onto the same volume while "strata" keeps serving, then exits.
+  #   STRATA_INSTALL_FAMILY=qwen STRATA_INSTALL_MODEL=IQ3_XXS docker compose --profile install run --rm strata-install
+  # Setup only reads the GPUs (nvidia-smi); it starts no engine, so sharing them with the live server is safe.
+  strata-install:
+    profiles: ["install"]
+    image: model-runner-strata:${STRATA_VERSION:-0.1.38}
+    restart: "no"
+    # the image's /health check is for the server; this container never serves
+    healthcheck:
+      disable: true
+    entrypoint: ["/opt/strata-runner/install-model.sh"]
+    volumes:
+      - ${STRATA_DATA_DIR:-./models-cache}:/data
+      - ./scripts/install-model.sh:/opt/strata-runner/install-model.sh:ro
+    environment:
+      <<: *install-settings
+      FAMILY: ${STRATA_INSTALL_FAMILY:-}
+      MODEL: ${STRATA_INSTALL_MODEL:-}
+    deploy: *gpus
+
+networks:
+  ai-inference:
+    external: true
+    name: ai-inference

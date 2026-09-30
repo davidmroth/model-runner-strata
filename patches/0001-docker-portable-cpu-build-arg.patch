@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: davidmroth <davidmroth@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 21:41:24 +0000
+Subject: [PATCH] docker: STRATA_PORTABLE build arg for an AVX2 CPU baseline
+
+docker build compiles ggml's CPU code with -march=native, so an image built on
+an AVX-512 machine crashes (SIGILL) on a CPU without it, e.g. strata-vision on
+an i7-1360P. Both CMakeLists already support STRATA_PORTABLE; this passes it
+through from a build arg. Default stays 0, so existing builds are unchanged.
+---
+ Dockerfile | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/Dockerfile b/Dockerfile
+index b1b7961..610f2ac 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -55,8 +55,12 @@ COPY . .
+ 
+ # RTX 20 (75), RTX 30 (86), RTX 40 (89), RTX 50 (120), plus 80 for A-series. CMakeLists
+ # refuses anything below 75. BUILD_VISION=0 skips the image encoder build.
++# ggml's CPU code is compiled for the build machine's CPU (-march=native), so an image
++# built on an AVX-512 CPU crashes on one without it. STRATA_PORTABLE=1 builds it for
++# any AVX2 CPU instead; Strata's own AVX-512 kernels are still chosen at run time.
+ ARG CUDA_ARCHITECTURES=75;80;86;89;120
+ ARG BUILD_VISION=1
++ARG STRATA_PORTABLE=0
+ 
+ RUN python3 -m venv .venv \
+     && .venv/bin/pip install --no-cache-dir --upgrade pip \
+@@ -76,15 +80,16 @@ llama = setup.get_llama_cpp()
+ nvcc, _ = setup.find_nvcc()
+ arch = os.environ.get("CUDA_ARCHITECTURES", "75;80;86;89;120").strip().strip('"').replace(",", ";")
+ vision = "gpu" if os.environ.get("BUILD_VISION", "1") == "1" else "none"
++portable = [f"-DSTRATA_PORTABLE={'ON' if os.environ.get('STRATA_PORTABLE', '0') == '1' else 'OFF'}"]
+ 
+ setup.cmake_build(setup.ROOT, setup.ROOT / "build", "strata",
+     ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF",
+      f"-DCMAKE_CUDA_ARCHITECTURES={arch}", f"-DCMAKE_CUDA_COMPILER={nvcc}",
+-     f"-DSTRATA_GGML_DIR={llama}"], None, "build-strata.bat")
++     f"-DSTRATA_GGML_DIR={llama}", *portable], None, "build-strata.bat")
+ if vision != "none":
+     setup.cmake_build(setup.ROOT / "tools" / "vision", setup.ROOT / "build-vision", "strata-vision",
+         [f"-DLLAMA_DIR={llama}", "-DSTRATA_VISION_CUDA=ON",
+-         f"-DCMAKE_CUDA_ARCHITECTURES={arch}", f"-DCMAKE_CUDA_COMPILER={nvcc}"], None, "build-vision.bat")
++         f"-DCMAKE_CUDA_ARCHITECTURES={arch}", f"-DCMAKE_CUDA_COMPILER={nvcc}", *portable], None, "build-vision.bat")
+ 
+ eng = setup.ROOT / "engine"
+ eng.mkdir(exist_ok=True)
+-- 
+2.54.0
+

@@ -1,0 +1,19 @@
+# Model weights and converted data
+models-cache/
+*.gguf
+*.safetensors
+
+# Secrets and per-host settings
+.env*
+!.env.example
+
+# Pinned upstream checkout plus patches/, created by scripts/prepare-upstream.sh
+upstream/
+
+__pycache__/
+*.py[cod]
+.venv/
+
+.DS_Store
+.vscode/
+.idea/
