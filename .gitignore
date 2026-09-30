@@ -1,0 +1,19 @@
+# Model weights and converted data
+models-cache/
+*.gguf
+*.safetensors
+
+# Secrets and per-host settings
+.env*
+!.env.example
+
+# A local checkout of upstream, used only for reading its source
+upstream/
+
+__pycache__/
+*.py[cod]
+.venv/
+
+.DS_Store
+.vscode/
+.idea/

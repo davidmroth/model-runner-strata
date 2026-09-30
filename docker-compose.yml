@@ -1,0 +1,72 @@
+# Strata (Qwen3.8-Flash-Next) on GPU + system RAM + SSD, internal :8080 on the ai-inference network.
+#
+#   docker network create ai-inference                        # once
+#   cp .env.example .env                                      # optional; the defaults below match it
+#   docker compose --profile serve up -d strata               # first start downloads and prepares the model
+#   ./scripts/run-tests.sh                                    # upstream's server tests + this repo's tests
+#
+# The image is upstream's own (github.com/Niko1221/Strata): since 0.2.x the engine is a signed prebuilt
+# package inside it, not something this repo compiles. So there is no build here, only settings.
+# Model files live in ./models-cache (mounted at /data) and survive version changes.
+
+x-gpus: &gpus
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: ${GPU_COUNT:-2}
+          capabilities: [compute, utility]
+
+services:
+  strata:
+    profiles: ["serve"]
+    image: ghcr.io/niko1221/strata:${STRATA_VERSION:-0.2.9}-cuda13
+    container_name: model-runner-strata
+    restart: ${RESTART:-unless-stopped}
+    expose:
+      - "8080"
+    volumes:
+      - ${STRATA_DATA_DIR:-./models-cache}:/data
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      # Which model to run. Sizes for the qwen family: Q2_0, IQ2_XS, IQ3_XXS, ... (docs/MODELS.md upstream).
+      FAMILY: ${STRATA_FAMILY:-qwen}
+      MODEL: ${STRATA_MODEL:-Q2_0}
+      CONTEXT: ${STRATA_CONTEXT:-131072}
+      KV: ${STRATA_KV:-int8}
+      # off | on | gpu | cpu. gpu keeps about 1.4 GB of VRAM free for the encoder.
+      VISION: ${STRATA_VISION:-gpu}
+      GPUS: ${STRATA_GPUS:-0,1}
+      # Settings saved under this name in the volume; reused on every start.
+      PRESET: ${STRATA_PRESET:-docker}
+      # quick | thorough | skip. Tuning takes 20-120 minutes once; skip keeps upstream's defaults.
+      TUNE: ${STRATA_TUNE:-skip}
+      # Requests answered at the same time, 1 to 8. Empty lets Strata fit it to the cards.
+      PARALLEL: ${STRATA_PARALLEL:-}
+      # A key is always on beyond loopback: set one, or the first start makes one and keeps it in the volume.
+      # Every request then sends Authorization: Bearer <key>; GET /health answers without one.
+      API_KEY: ${STRATA_API_KEY:-}
+      # Advanced engine settings, space separated KEY=VALUE (see `strata launch --help`).
+      # STRATA_SPLIT_OWN=1 gives every card its own prompt buffers instead of borrowing expert-cache slots.
+      # STRATA_PREFILL_LAYER_MAJOR=0 reads a prompt chunk by chunk; the layer-major walk that 0.2.7+ turns on for a
+      # layer split is a win when experts stream from RAM and slower when they are all already resident.
+      # Add layer_split=N to fix where the second card starts; empty lets Strata choose.
+      STRATA_SET: ${STRATA_SET:-STRATA_SPLIT_OWN=1 STRATA_PREFILL_LAYER_MAJOR=0}
+      # Without a key the server answers only Host names it knows (DNS-rebinding guard). The container's
+      # hostname is its own id, so other containers reach it by container name. Ignored when API_KEY is set.
+      STRATA_ALLOWED_HOSTS: ${STRATA_ALLOWED_HOSTS:-model-runner-strata}
+    # Strata pins part of system RAM for the GPU; without this the engine falls back or fails to start.
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    cap_add:
+      - IPC_LOCK
+    deploy: *gpus
+    networks:
+      - ai-inference
+
+networks:
+  ai-inference:
+    external: true
+    name: ai-inference
